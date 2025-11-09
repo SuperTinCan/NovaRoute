@@ -6,6 +6,8 @@ import altair as alt
 import json
 import os
 from datetime import datetime
+import random
+import time
 
 # ---- Config ----
 API_URL = "http://127.0.0.1:8000/analyze"
@@ -44,6 +46,83 @@ def load_txns():
 
 accounts = load_accounts()
 txns_df = load_txns()
+
+# ---------- Helpers for "Inject High Fraud" ----------
+FRAUD_CSV = "data/fraud_scores.csv"
+TXN_CSV = "data/transactions.csv"
+
+def ensure_data_paths():
+    os.makedirs("data", exist_ok=True)
+    # create empty files if missing so injection won't crash
+    if not os.path.exists(FRAUD_CSV):
+        pd.DataFrame(columns=["txn_id","user_id","fraud_score","fraud_label"]).to_csv(FRAUD_CSV, index=False)
+    if not os.path.exists(TXN_CSV):
+        pd.DataFrame(columns=[
+            "txn_id","user_id","timestamp","amount","currency","merchant","merchant_category",
+            "city","country","channel","is_foreign","is_high_amount","velocity_24h",
+            "device_fingerprint","ip_country","merchant_risk_score","label_fraud","user_reported_issue"
+        ]).to_csv(TXN_CSV, index=False)
+
+def inject_high_fraud_into_scores(user_id: str, n: int = 5, also_add_txns: bool = True):
+    """
+    Append n high-fraud rows to fraud_scores.csv for user_id.
+    If also_add_txns True, add minimal transaction rows to transactions.csv too.
+    Returns DataFrame of injected rows.
+    """
+    ensure_data_paths()
+
+    fraud_df = pd.read_csv(FRAUD_CSV)
+    txns_df = pd.read_csv(TXN_CSV) if os.path.exists(TXN_CSV) else pd.DataFrame()
+
+    injected = []
+    now_ts = datetime.utcnow()
+    for i in range(n):
+        unique_suffix = f"{int(time.time()*1000)}_{random.randint(0,9999)}"
+        txn_id = f"inj_{user_id}_{unique_suffix}"
+        fraud_score = round(random.uniform(0.87, 0.99), 6)  # very high suspicious score
+        fraud_label = 1
+
+        injected.append({
+            "txn_id": txn_id,
+            "user_id": user_id,
+            "fraud_score": fraud_score,
+            "fraud_label": fraud_label
+        })
+
+        if also_add_txns:
+            # add a minimal transaction row so transactions.csv can display it
+            txn_row = {
+                "txn_id": txn_id,
+                "user_id": user_id,
+                "timestamp": (now_ts - pd.Timedelta(minutes=random.randint(0,60))).isoformat()+"Z",
+                "amount": round(random.uniform(1000, 4500), 2),
+                "currency": "USD",
+                "merchant": f"SuspiciousMerchant_{random.randint(1,200)}",
+                "merchant_category": "electronics",
+                "city": "UnknownCity",
+                "country": random.choice(["RU","CN","NG","BR","UA"]),
+                "channel": "online",
+                "is_foreign": 1,
+                "is_high_amount": 1,
+                "velocity_24h": random.randint(1,5),
+                "device_fingerprint": f"inj_dev_{user_id}",
+                "ip_country": random.choice(["RU","CN","NG","BR","UA"]),
+                "merchant_risk_score": round(random.uniform(0.85, 0.99), 2),
+                "label_fraud": 1,
+                "user_reported_issue": True
+            }
+            # append to txns_df safely
+            txns_df = pd.concat([txns_df, pd.DataFrame([txn_row])], ignore_index=True)
+
+    # append to fraud_df and save
+    fraud_df = pd.concat([fraud_df, pd.DataFrame(injected)], ignore_index=True)
+    fraud_df.to_csv(FRAUD_CSV, index=False)
+
+    if also_add_txns:
+        txns_df.to_csv(TXN_CSV, index=False)
+
+    return pd.DataFrame(injected)
+
 
 # ---- Session State ----
 if "user_chats" not in st.session_state:
@@ -107,6 +186,27 @@ with left:
             st.markdown("---")
     else:
         st.info("No messages yet for this user.")
+
+# ---------- UI: Inject button (right column near account details) ----------
+with right:  # assuming 'right' is your account column variable
+    st.markdown("### Demo controls")
+    cols = st.columns([1,1,2])
+    with cols[0]:
+        inj_n = st.number_input("How many fraud txns to inject", min_value=1, max_value=50, value=5, step=1, key="inj_n")
+    with cols[1]:
+        also_txns = st.checkbox("Also add minimal transactions (recommended)", value=True, key="inj_add_txns")
+    with cols[2]:
+        if st.button("⚠️ Inject High-Fraud for this user"):
+            try:
+                injected_df = inject_high_fraud_into_scores(user_id, n=int(inj_n), also_add_txns=bool(also_txns))
+                st.success(f"Injected {len(injected_df)} high-fraud entries for {user_id}.")
+                st.dataframe(injected_df, use_container_width=True, height=200)
+                # optional: reload local dataframes in the app (so UI shows new txns immediately)
+                # reload global txns_df and accounts if you maintain them as globals
+                txns_df = load_txns()  # if you have this loader function in your file
+            except Exception as e:
+                st.error(f"Injection failed: {e}")
+
 
 # ---- Right column: Account details and transaction list ----
 with right:
