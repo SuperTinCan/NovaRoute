@@ -10,11 +10,9 @@ app = FastAPI()
 
 @app.post("/analyze")
 async def analyze_message(data: MessageRequest):
-    analysis = analyze_message_with_gemini(data.message)
-    return {
-        "user_id": data.user_id,
-        **analysis
-    }
+    result = analyze_message_with_gemini(data.message, data.user_id)
+    return {"user_id": data.user_id, **result}
+
 
 @app.get("/")
 def root():
